@@ -328,7 +328,13 @@ async function main() {
     found.sort((a, b) => (priceOf(a) ?? 999) - (priceOf(b) ?? 999));
     const urgent = found.some(f => priceOf(f) !== null && priceOf(f) < URGENT_PRICE);
     const best = found[0];
-    const lines = found.map(f => `• ${f.p.name} — ${f.iso}\n  ${f.r.detail}\n  ${f.r.link || f.p.url}`).join('\n\n');
+    const lines = found.map(f => {
+      const deep = Boolean(f.r.link) && f.r.link.includes('/checkout/');
+      return `• ${f.p.name} — ${fmt(f.iso, 'en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}\n`
+        + `  BOOK: ${f.r.link || f.p.url}\n`
+        + `  ${deep ? `(opens checkout with ${PEOPLE} adults, date and time already set)` : '(pick the date and time on this page)'}\n`
+        + `  ${f.r.detail}`;
+    }).join('\n\n');
     const bestDay = fmt(best.iso, 'en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
     await sendPush(
       `${urgent ? 'BOOK NOW - ' : ''}Sagrada Familia ${bestDay}${best.r.price ? ` EUR ${best.r.price}pp` : ''}`,
@@ -337,7 +343,7 @@ async function main() {
     ).catch(e => log(`!! Push failed: ${e.message}`));
     const dates = [...new Set(found.map(f => fmt(f.iso, 'en-GB', { day: 'numeric', month: 'short' })))].join(' & ');
     try {
-      await sendEmail(`🎟️ Sagrada Família tickets AVAILABLE: ${dates}`,
+      await sendEmail(`🎟️ BOOK NOW: Sagrada Família ${dates}${best.r.price ? ` — €${best.r.price} pp` : ''}`,
         `Tickets for ${PEOPLE} people (${LANGUAGE}, under €${MAX_PRICE} pp) just showed up. Book fast:\n\n${lines}\n\n(Checked ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/Madrid' })} Barcelona time)`);
       for (const f of found) state.alerted[f.key] = new Date().toISOString();
     } catch (e) {
