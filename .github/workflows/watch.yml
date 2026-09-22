@@ -1,18 +1,25 @@
 name: Sagrada Família ticket watch
 
+# GitHub throttles short cron schedules heavily, so each run stays alive for ~5h40m,
+# checks every 3 minutes, then starts its own successor. The hourly cron is only a
+# backup in case the chain breaks; the concurrency group keeps it to one run at a time.
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes (GitHub may delay scheduled runs a bit)
+    - cron: '17 * * * *'
   workflow_dispatch:
 
 concurrency:
   group: watch
   cancel-in-progress: false
 
+permissions:
+  actions: write   # to start the next run
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -30,18 +37,33 @@ jobs:
           key: state-${{ github.run_id }}
           restore-keys: state-
 
-      - name: Check availability
-        run: node check.mjs
+      - name: Check availability every 3 minutes
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+        run: |
+          deadline=$(date -d '2026-09-26 20:00 +0200' +%s)
+          end=$((SECONDS + 20400))   # 5h40m, leaves time to hand over
+          while [ $SECONDS -lt $end ] && [ "$(date +%s)" -lt "$deadline" ]; do
+            node check.mjs || echo "check failed, retrying next round"
+            sleep 180
+          done
 
       - uses: actions/cache/save@v4
         if: always()
         with:
           path: state.json
           key: state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Start the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date +%s)" -lt "$(date -d '2026-09-26 20:00 +0200' +%s)" ]; then
+            gh workflow run watch.yml --repo "$GITHUB_REPOSITORY" --ref main
+          fi
 
       - uses: actions/upload-artifact@v4
         if: failure()
