@@ -42,6 +42,7 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
           deadline=$(date -d '2026-09-26 20:00 +0200' +%s)
           end=$((SECONDS + 20400))   # 5h40m, leaves time to hand over

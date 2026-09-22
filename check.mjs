@@ -25,6 +25,7 @@ const ONLY = process.argv.includes('--only') ? process.argv[process.argv.indexOf
 const LANGUAGE = 'English';
 const PEOPLE = Number(process.env.PEOPLE || 2);
 const MAX_PRICE = Number(process.env.MAX_PRICE || 100); // € per person — must be strictly below this
+const URGENT_PRICE = Number(process.env.URGENT_PRICE || 50); // below this: urgent phone alert
 // Lowest € amount in a piece of text (discounted price is always below the struck-through one).
 const minPrice = t => { const v = [...t.matchAll(/€\s?([\d.,]+)/g)].map(m => Number(m[1].replace(/,/g, ''))).filter(n => n > 0); return v.length ? Math.min(...v) : null; };
 const OTHER_LANGS = /\b(Spanish|French|Italian|German|Catalan|Portuguese|Russian|Chinese|Japanese|Korean|Dutch|Polish)\b/i;
@@ -73,7 +74,7 @@ function loadEnv() {
       .map(l => { const i = l.indexOf('='); return [l.slice(0, i).trim(), l.slice(i + 1).trim()]; })
   );
   const pick = k => process.env[k] || file[k];
-  return { GMAIL_USER: pick('GMAIL_USER'), GMAIL_APP_PASSWORD: pick('GMAIL_APP_PASSWORD'), NOTIFY_TO: pick('NOTIFY_TO') };
+  return { GMAIL_USER: pick('GMAIL_USER'), GMAIL_APP_PASSWORD: pick('GMAIL_APP_PASSWORD'), NOTIFY_TO: pick('NOTIFY_TO'), NTFY_TOPIC: pick('NTFY_TOPIC') };
 }
 const env = loadEnv();
 
@@ -95,6 +96,25 @@ async function sendEmail(subject, text) {
   });
   await t.sendMail({ from: env.GMAIL_USER, to: env.NOTIFY_TO || env.GMAIL_USER, subject, text });
   log(`Email sent: ${subject}`);
+}
+
+// Phone push via the ntfy app (https://ntfy.sh). Tapping the notification opens `url`.
+async function sendPush(title, message, url, urgent) {
+  if (!env.NTFY_TOPIC) { log('(no NTFY_TOPIC — skipping push)'); return; }
+  if (process.env.DRY_RUN) { log(`(dry run) would push [${urgent ? 'URGENT' : 'high'}]: ${title} — ${message} → ${url}`); return; }
+  const res = await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
+    method: 'POST',
+    body: message,
+    headers: {
+      Title: title.replace(/[^\x20-\x7E]/g, ''), // header must be ASCII
+      Priority: urgent ? '5' : '4',
+      Tags: urgent ? 'rotating_light,ticket' : 'ticket',
+      Click: url,
+      Actions: `view, Book now, ${url}, clear=true`,
+    },
+  });
+  if (!res.ok) throw new Error(`ntfy ${res.status}`);
+  log(`Push sent: ${title}`);
 }
 
 // Each checker returns { [isoDate]: { available, detail, link? } } (missing date = could not determine)
@@ -204,8 +224,8 @@ async function headoutOptions(page, p, iso) {
   for (const c of candidates) {
     if (good.length) break; // one confirmed option is enough to alert
     if (c !== candidates[0] && await headoutPrepare(page, p, iso)) break;
-    const { seats, time } = await headoutSeats(page, c.i);
-    if (seats == null || seats >= PEOPLE) good.push({ ...c, seats, time });
+    const { seats, time, price, checkoutUrl } = await headoutSeats(page, c.i);
+    if (seats == null || seats >= PEOPLE) good.push({ ...c, seats, time, price: price ?? minPrice(c.text.split(/\| Select\b/)[0]), checkoutUrl });
     else rejected.push(`${shortCard(c.text)} (${seats ? `only ${seats} left` : 'none suitable'}${time ? ` — ${time}` : ''})`);
   }
   if (!good.length)
@@ -214,7 +234,8 @@ async function headoutOptions(page, p, iso) {
   return {
     available: true,
     detail: `${shortCard(g.text)}${g.time ? ` at ${g.time}` : ''}${g.seats === undefined ? ' (seat count not verified)' : g.seats === null ? '' : ` (${g.seats} left)`}`,
-    link: p.dateUrl(iso),
+    link: g.checkoutUrl || p.dateUrl(iso),
+    price: g.price,
   };
 }
 
@@ -227,7 +248,7 @@ const shortCard = t => t.split(' | ').filter(s => !/^(Select|Cancel for free.*|D
 async function headoutSeats(page, cardIndex) {
   await headoutCards(page).nth(cardIndex).click({ timeout: 10000 });
   await page.waitForTimeout(1500);
-  let time = null;
+  let time = null, price = null;
   const slotPicker = page.getByText(/^Select a time slot$/);
   if (await slotPicker.count()) {
     const slotTimes = page.getByText(/^\d{1,2}:\d{2}\s?(am|pm)$/i);
@@ -242,7 +263,8 @@ async function headoutSeats(page, cardIndex) {
     if (!slots.length) return { seats: undefined, time: null }; // couldn't read the slot list
     // No slot has both an OK price and enough seats: report the best seat count among affordable slots.
     if (idx < 0) return { seats: Math.max(...slots.filter(okPrice).map(t => Number((t.match(/(\d+) tickets? left/i) || [0, 0])[1]))), time: `every slot under €${MAX_PRICE}` };
-    time = `${slots[idx].split(' | ')[0]} (€${minPrice(slots[idx]) ?? '?'})`;
+    price = minPrice(slots[idx]);
+    time = `${slots[idx].split(' | ')[0]} (€${price ?? '?'})`;
     await slotTimes.nth(idx).click({ timeout: 5000 });
     await page.waitForTimeout(1000);
   }
@@ -253,7 +275,9 @@ async function headoutSeats(page, cardIndex) {
   }
   if (!(await page.getByText(/^Guests$/).count())) return { seats: undefined, time }; // couldn't reach step 2
   const m = (await page.locator('body').innerText()).match(/Only (\d+) tickets? left/i);
-  return { seats: m ? Number(m[1]) : null, time };
+  // Step-2 URL carries date, option, time and ticket counts: set it to PEOPLE adults for a one-tap link.
+  const checkoutUrl = page.url().includes('/checkout/') ? page.url().replace(/pax\.adult=\d+/, `pax.adult=${PEOPLE}`) : null;
+  return { seats: m ? Number(m[1]) : null, time, price, checkoutUrl };
 }
 
 const CHECKERS = { official: checkOfficial, headout: checkHeadout };
@@ -299,7 +323,18 @@ async function main() {
   await browser.close();
 
   if (found.length) {
+    // Official tickets are ~€26–50; resale options carry their own price.
+    const priceOf = f => f.r.price ?? (f.p.site === 'official' ? 0 : null);
+    found.sort((a, b) => (priceOf(a) ?? 999) - (priceOf(b) ?? 999));
+    const urgent = found.some(f => priceOf(f) !== null && priceOf(f) < URGENT_PRICE);
+    const best = found[0];
     const lines = found.map(f => `• ${f.p.name} — ${f.iso}\n  ${f.r.detail}\n  ${f.r.link || f.p.url}`).join('\n\n');
+    const bestDay = fmt(best.iso, 'en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+    await sendPush(
+      `${urgent ? 'BOOK NOW - ' : ''}Sagrada Familia ${bestDay}${best.r.price ? ` EUR ${best.r.price}pp` : ''}`,
+      `${best.p.name}: ${best.r.detail}${found.length > 1 ? ` (+${found.length - 1} more, see email)` : ''}`,
+      best.r.link || best.p.url, urgent,
+    ).catch(e => log(`!! Push failed: ${e.message}`));
     const dates = [...new Set(found.map(f => fmt(f.iso, 'en-GB', { day: 'numeric', month: 'short' })))].join(' & ');
     try {
       await sendEmail(`🎟️ Sagrada Família tickets AVAILABLE: ${dates}`,
