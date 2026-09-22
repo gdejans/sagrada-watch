@@ -24,7 +24,7 @@ const ONLY = process.argv.includes('--only') ? process.argv[process.argv.indexOf
 // Requirements: an English-language option with room for this many people.
 const LANGUAGE = 'English';
 const PEOPLE = Number(process.env.PEOPLE || 2);
-const MAX_PRICE = Number(process.env.MAX_PRICE || 100); // € per person
+const MAX_PRICE = Number(process.env.MAX_PRICE || 100); // € per person — must be strictly below this
 // Lowest € amount in a piece of text (discounted price is always below the struck-through one).
 const minPrice = t => { const v = [...t.matchAll(/€\s?([\d.,]+)/g)].map(m => Number(m[1].replace(/,/g, ''))).filter(n => n > 0); return v.length ? Math.min(...v) : null; };
 const OTHER_LANGS = /\b(Spanish|French|Italian|German|Catalan|Portuguese|Russian|Chinese|Japanese|Korean|Dutch|Polish)\b/i;
@@ -138,7 +138,7 @@ async function checkHeadout(page, p) {
       const l = (await btn.first().getAttribute('aria-label')) || (await btn.first().innerText());
       const dayPrice = minPrice(l);
       if (!/available/i.test(l) || /sold out/i.test(l)) out[iso] = { available: false, detail: l };
-      else if (dayPrice !== null && dayPrice > MAX_PRICE) out[iso] = { available: false, detail: `open, but cheapest is €${dayPrice} (> €${MAX_PRICE})` };
+      else if (dayPrice !== null && dayPrice >= MAX_PRICE) out[iso] = { available: false, detail: `open, but cheapest is €${dayPrice} (not under €${MAX_PRICE})` };
       else open.push(iso);
     } else {
       // A fully sold-out month is skipped entirely, with a "Dates not available in <Month>" note.
@@ -193,7 +193,7 @@ async function headoutOptions(page, p, iso) {
     if (!new RegExp(LANGUAGE, 'i').test(title) && OTHER_LANGS.test(title)) return false; // another language only
     if (hasLangs && !new RegExp(LANGUAGE, 'i').test(c.text) && OTHER_LANGS.test(c.text)) return false;
     const price = minPrice(c.text.split(/\| Select\b/)[0]);
-    if (price !== null && price > MAX_PRICE) return false;
+    if (price !== null && price >= MAX_PRICE) return false;
     const left = c.text.match(/(\d+) tickets? left/i);
     return !left || Number(left[1]) >= PEOPLE;
   });
@@ -236,12 +236,12 @@ async function headoutSeats(page, cardIndex) {
       let c = e; for (let k = 0; k < 4 && c.parentElement; k++) { c = c.parentElement; if (/Duration/.test(c.innerText)) break; }
       return c.innerText.replace(/\s*\n+\s*/g, ' | ');
     }));
-    const okPrice = t => { const pr = minPrice(t); return pr === null || pr <= MAX_PRICE; };
+    const okPrice = t => { const pr = minPrice(t); return pr === null || pr < MAX_PRICE; };
     const idx = slots.findIndex(t => { const m = t.match(/(\d+) tickets? left/i); return okPrice(t) && (!m || Number(m[1]) >= PEOPLE); });
-    if (slots.length && !slots.some(okPrice)) return { seats: 0, time: `all slots > €${MAX_PRICE}` };
+    if (slots.length && !slots.some(okPrice)) return { seats: 0, time: `no slot under €${MAX_PRICE}` };
     if (!slots.length) return { seats: undefined, time: null }; // couldn't read the slot list
     // No slot has both an OK price and enough seats: report the best seat count among affordable slots.
-    if (idx < 0) return { seats: Math.max(...slots.filter(okPrice).map(t => Number((t.match(/(\d+) tickets? left/i) || [0, 0])[1]))), time: `every slot ≤ €${MAX_PRICE}` };
+    if (idx < 0) return { seats: Math.max(...slots.filter(okPrice).map(t => Number((t.match(/(\d+) tickets? left/i) || [0, 0])[1]))), time: `every slot under €${MAX_PRICE}` };
     time = `${slots[idx].split(' | ')[0]} (€${minPrice(slots[idx]) ?? '?'})`;
     await slotTimes.nth(idx).click({ timeout: 5000 });
     await page.waitForTimeout(1000);
@@ -303,7 +303,7 @@ async function main() {
     const dates = [...new Set(found.map(f => fmt(f.iso, 'en-GB', { day: 'numeric', month: 'short' })))].join(' & ');
     try {
       await sendEmail(`🎟️ Sagrada Família tickets AVAILABLE: ${dates}`,
-        `Tickets for ${PEOPLE} people (${LANGUAGE}, max €${MAX_PRICE} pp) just showed up. Book fast:\n\n${lines}\n\n(Checked ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/Madrid' })} Barcelona time)`);
+        `Tickets for ${PEOPLE} people (${LANGUAGE}, under €${MAX_PRICE} pp) just showed up. Book fast:\n\n${lines}\n\n(Checked ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/Madrid' })} Barcelona time)`);
       for (const f of found) state.alerted[f.key] = new Date().toISOString();
     } catch (e) {
       log(`!! Email failed: ${e.message}`);
